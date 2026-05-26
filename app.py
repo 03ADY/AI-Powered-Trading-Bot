@@ -1,541 +1,322 @@
-# Essential imports
-import warnings
-warnings.filterwarnings('ignore')
-import numpy as np
+"""TradePulse Enterprise — trading command center."""
+
+from datetime import datetime
+
 import pandas as pd
-import torch
-import torch.nn as nn
-from sklearn.preprocessing import StandardScaler
+import plotly.express as px
 import plotly.graph_objects as go
-import logging
-from typing import List
-from datetime import datetime, timedelta
-import asyncio
+from plotly.subplots import make_subplots
+
 import streamlit as st
-import time
-import threading
 
-# Alpaca API imports
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.data.live import StockDataStream
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from trading.backtest import backtest_vs_buy_hold, run_backtest
+from trading.compare import compare_symbols
+from trading.monte_carlo import simulate_paths
+from trading.sizing import fixed_fractional, kelly_fraction
+from trading.config import APP_NAME, BENCHMARK, INITIAL_CAPITAL, SCENARIOS, DEFAULT_SYMBOLS
+from trading.data import fetch_yfinance
+from trading.indicators import add_indicators
+from trading.insights import executive_brief, insight_cards, scan_signals
+from trading.portfolio_sim import PaperPortfolio
+from trading.reports import brief_html
+from trading.risk import PortfolioAnalytics
+from trading.strategy import TradingStrategy
+from trading.demo_flow import run_perfect_demo
+from trading.views import render_allocation, render_export_center, render_strategy_lab
 
-# --- Setup Logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s')
-logger = logging.getLogger(__name__)
+st.set_page_config(page_title=APP_NAME, page_icon="📈", layout="wide")
 
-# --- Technical Analysis ---
-class TechnicalAnalysis:
-    @staticmethod
-    def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        try:
-            if df.empty or len(df) < 26:  # Need at least 26 periods for EMA_26
-                return df
-                
-            df = df.copy()
-            df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
-            
-            # Moving averages
-            df['SMA_20'] = df['Close'].rolling(window=20).mean()
-            df['SMA_50'] = df['Close'].rolling(window=50).mean()
-            
-            # MACD
-            df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
-            df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
-            df['MACD'] = df['EMA_12'] - df['EMA_26']
-            df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-            df['MACD_Histogram'] = df['MACD'] - df['MACD_Signal']
-            
-            # RSI
-            delta = df['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            
-            # Avoid division by zero
-            rs = gain / loss.replace(0, np.nan)
-            df['RSI'] = 100 - (100 / (1 + rs))
-            
-            # Bollinger Bands
-            df['BB_Middle'] = df['Close'].rolling(window=20).mean()
-            bb_std = df['Close'].rolling(window=20).std()
-            df['BB_Upper'] = df['BB_Middle'] + (bb_std * 2)
-            df['BB_Lower'] = df['BB_Middle'] - (bb_std * 2)
-            
-            # Volume indicators
-            df['Volume_SMA'] = df['Volume'].rolling(window=20).mean()
-            df['Volume_Ratio'] = df['Volume'] / df['Volume_SMA']
-            
-            return df
-        except Exception as e:
-            logger.error(f"Error calculating indicators: {e}")
-            return df
+st.markdown(f"""
+<div style="background:linear-gradient(135deg,#059669,#2563eb);padding:1.5rem 2rem;border-radius:14px;color:white;">
+<h1 style="margin:0;">📈 {APP_NAME}</h1>
+<p style="margin:0.4rem 0 0;">Perfect demo · Strategy Lab · Walk-forward · Full dashboard export</p>
+</div>
+""", unsafe_allow_html=True)
 
-# --- Enhanced Trading Strategy ---
-class TradingStrategy:
-    def __init__(self):
-        self.position_size = 0.02  # 2% of portfolio per trade
-        self.max_positions = 3
-        self.stop_loss = 0.02  # 2% stop loss
-        self.take_profit = 0.04  # 4% take profit
-        
-    def generate_signal(self, df: pd.DataFrame, symbol: str) -> dict:
-        """Generate trading signal with confidence score"""
-        if df.empty or len(df) < 50:
-            return {'signal': 0, 'confidence': 0, 'reason': 'Insufficient data'}
-        
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-        
-        signals = []
-        reasons = []
-        
-        # MACD Signal
-        if latest['MACD'] > latest['MACD_Signal'] and prev['MACD'] <= prev['MACD_Signal']:
-            signals.append(1)
-            reasons.append('MACD bullish crossover')
-        elif latest['MACD'] < latest['MACD_Signal'] and prev['MACD'] >= prev['MACD_Signal']:
-            signals.append(-1)
-            reasons.append('MACD bearish crossover')
-        
-        # RSI Signal
-        if latest['RSI'] < 30 and prev['RSI'] >= 30:
-            signals.append(1)
-            reasons.append('RSI oversold')
-        elif latest['RSI'] > 70 and prev['RSI'] <= 70:
-            signals.append(-1)
-            reasons.append('RSI overbought')
-        
-        # Bollinger Bands
-        if latest['Close'] < latest['BB_Lower'] and latest['Close'] > prev['Close']:
-            signals.append(1)
-            reasons.append('Bollinger bounce')
-        elif latest['Close'] > latest['BB_Upper'] and latest['Close'] < prev['Close']:
-            signals.append(-1)
-            reasons.append('Bollinger resistance')
-        
-        # Volume confirmation
-        volume_confirmed = latest['Volume_Ratio'] > 1.2
-        
-        if signals:
-            signal = np.mean(signals)
-            confidence = len(signals) / 3  # Max 3 signals
-            if volume_confirmed:
-                confidence *= 1.2
-            
-            return {
-                'signal': 1 if signal > 0.3 else (-1 if signal < -0.3 else 0),
-                'confidence': min(confidence, 1.0),
-                'reason': ', '.join(reasons)
-            }
-        
-        return {'signal': 0, 'confidence': 0, 'reason': 'No clear signal'}
+strategy = TradingStrategy()
+analytics = PortfolioAnalytics()
 
-# --- Risk Management ---
-class RiskManager:
-    def __init__(self, max_portfolio_risk=0.05):
-        self.max_portfolio_risk = max_portfolio_risk
-        self.max_daily_loss = 0.02
-        self.max_positions = 3
-        
-    def calculate_position_size(self, account_value: float, entry_price: float, stop_loss_price: float) -> int:
-        """Calculate position size based on risk management"""
-        risk_per_share = abs(entry_price - stop_loss_price)
-        if risk_per_share == 0:
-            return 0
-        
-        risk_amount = account_value * self.max_portfolio_risk
-        position_size = int(risk_amount / risk_per_share)
-        
-        return max(1, position_size)
-    
-    def should_trade(self, current_positions: int, daily_pnl: float, account_value: float) -> bool:
-        """Check if we should continue trading"""
-        if current_positions >= self.max_positions:
-            return False
-        
-        max_daily_loss_amount = account_value * self.max_daily_loss
-        if daily_pnl < -max_daily_loss_amount:
-            return False
-        
-        return True
+if "portfolio" not in st.session_state:
+    st.session_state.portfolio = PaperPortfolio(cash=INITIAL_CAPITAL)
+if "market_data" not in st.session_state:
+    st.session_state.market_data = {}
 
-# --- Enhanced Live Trading System ---
-class LiveTradingSystem:
-    def __init__(self, symbols: List[str], trading_client: TradingClient):
-        self.symbols = symbols
-        self.trading_client = trading_client
-        self.historical_client = StockHistoricalDataClient(
-            st.secrets["API_KEY"], 
-            st.secrets["SECRET_KEY"]
-        )
-        self.technical_analysis = TechnicalAnalysis()
-        self.strategy = TradingStrategy()
-        self.risk_manager = RiskManager()
-        self.stream = None
-        self.is_running = False
+with st.sidebar:
+    st.markdown("### 🎬 Demo")
+    present = st.toggle("Present mode", value=True)
+    scenario = st.selectbox("Scenario", list(SCENARIOS.keys()), index=0)
+    st.caption(SCENARIOS[scenario]["blurb"])
+    preset_syms = SCENARIOS[scenario]["symbols"] if scenario != "Custom" else DEFAULT_SYMBOLS
+    symbols = st.multiselect("Symbols", DEFAULT_SYMBOLS, default=preset_syms[:5])
+    days = 90 if present else st.slider("History (days)", 30, 365, 90)
+    dry_run = st.toggle("Dry run orders", value=True)
+    use_synthetic = st.toggle("Force synthetic data", value=False, help="Offline demo without Yahoo")
+    auto_refresh = False if present else st.toggle("Auto-refresh", value=False)
+    if st.button("📥 Load / refresh data", type="primary", use_container_width=True):
+        st.cache_data.clear()
+        sym_list = list(dict.fromkeys(symbols + [BENCHMARK]))
+        if use_synthetic:
+            from trading.synthetic import generate_synthetic
+            raw = {s: generate_synthetic(s, days=days) for s in sym_list}
+            st.session_state.data_source = "synthetic"
+        else:
+            raw = fetch_yfinance(sym_list, days=days)
+            st.session_state.data_source = "yahoo"
+        for sym in raw:
+            raw[sym] = add_indicators(raw[sym])
+        st.session_state.market_data = raw
+        st.toast(f"Loaded {len(raw)} symbols ({st.session_state.data_source})")
+    if st.button("✨ Run perfect demo", use_container_width=True):
+        with st.spinner("Running full demo flow…"):
+            run_perfect_demo(preset_syms, days=days, synthetic=use_synthetic)
+        st.cache_data.clear()
+        st.rerun()
+    if st.button("🔄 Reset paper portfolio"):
+        st.session_state.portfolio = PaperPortfolio(cash=INITIAL_CAPITAL)
+        st.session_state.pop("perfect_demo_done", None)
+        st.rerun()
+    with st.expander("✅ Presenter checklist"):
+        st.markdown("""
+1. **Run perfect demo**  
+2. **Scanner** → top BUY  
+3. **Strategy Lab** → walk-forward  
+4. **Backtest** → vs buy & hold  
+5. **Monte Carlo** → fan chart  
+6. **Export Center** → dashboard HTML  
+        """)
+    try:
+        if "API_KEY" in st.secrets:
+            st.toggle("Alpaca (needs keys)", value=False)
+    except Exception:
+        pass
 
-    def initialize_data(self):
-        """Initialize historical data for all symbols"""
-        if 'data' not in st.session_state:
-            st.session_state.data = {}
-        
-        for symbol in self.symbols:
-            try:
-                # Get more historical data for better indicators
-                request_params = StockBarsRequest(
-                    symbol_or_symbols=[symbol],
-                    timeframe=TimeFrame.Hour,
-                    start=datetime.now() - timedelta(days=30)
-                )
-                
-                bars = self.historical_client.get_stock_bars(request_params).df
-                
-                if not bars.empty:
-                    # Reset index to get timestamp as a column
-                    bars = bars.reset_index()
-                    bars = bars.rename(columns={
-                        'close': 'Close', 'open': 'Open', 
-                        'high': 'High', 'low': 'Low', 'volume': 'Volume'
-                    })
-                    
-                    # Set timestamp as index
-                    bars = bars.set_index('timestamp')
-                    
-                    # Add technical indicators
-                    bars = self.technical_analysis.add_indicators(bars)
-                    st.session_state.data[symbol] = bars
-                    
-                    logger.info(f"Initialized data for {symbol} with {len(bars)} bars.")
-                else:
-                    st.session_state.data[symbol] = pd.DataFrame()
-                    
-            except Exception as e:
-                logger.error(f"Failed to initialize data for {symbol}: {e}")
-                st.session_state.data[symbol] = pd.DataFrame()
-
-    def update_data(self, bar):
-        """Update data with new bar"""
-        symbol = bar.symbol
-        if symbol in st.session_state.data:
-            try:
-                new_row = pd.DataFrame([{
-                    'Open': bar.open, 'High': bar.high, 'Low': bar.low,
-                    'Close': bar.close, 'Volume': bar.volume
-                }], index=[pd.to_datetime(bar.timestamp)])
-                
-                # Add to existing data
-                st.session_state.data[symbol] = pd.concat([st.session_state.data[symbol], new_row])
-                
-                # Keep only last 1000 bars to manage memory
-                if len(st.session_state.data[symbol]) > 1000:
-                    st.session_state.data[symbol] = st.session_state.data[symbol].tail(1000)
-                
-                # Recalculate indicators
-                st.session_state.data[symbol] = self.technical_analysis.add_indicators(st.session_state.data[symbol])
-                
-            except Exception as e:
-                logger.error(f"Error updating data for {symbol}: {e}")
-
-    def execute_trade(self, symbol: str, signal_info: dict):
-        """Execute trade based on signal"""
-        try:
-            # Get current account info
-            account = self.trading_client.get_account()
-            account_value = float(account.portfolio_value)
-            
-            # Get current position
-            try:
-                position = self.trading_client.get_open_position(symbol)
-                current_qty = int(position.qty)
-            except:
-                current_qty = 0
-            
-            # Get current positions count
-            positions = self.trading_client.get_all_positions()
-            current_positions = len(positions)
-            
-            # Check if we should trade
-            daily_pnl = float(account.equity) - float(account.last_equity)
-            if not self.risk_manager.should_trade(current_positions, daily_pnl, account_value):
-                return "Risk limits exceeded"
-            
-            signal = signal_info['signal']
-            current_price = st.session_state.data[symbol]['Close'].iloc[-1]
-            
-            if signal == 1 and current_qty == 0:  # Buy signal
-                # Calculate position size
-                stop_loss_price = current_price * (1 - self.strategy.stop_loss)
-                qty = self.risk_manager.calculate_position_size(account_value, current_price, stop_loss_price)
-                
-                if qty > 0:
-                    order_data = MarketOrderRequest(
-                        symbol=symbol, 
-                        qty=qty, 
-                        side=OrderSide.BUY, 
-                        time_in_force=TimeInForce.DAY
-                    )
-                    
-                    order = self.trading_client.submit_order(order_data=order_data)
-                    return f"BUY {qty} shares at ${current_price:.2f}"
-                    
-            elif signal == -1 and current_qty > 0:  # Sell signal
-                order_data = MarketOrderRequest(
-                    symbol=symbol, 
-                    qty=abs(current_qty), 
-                    side=OrderSide.SELL, 
-                    time_in_force=TimeInForce.DAY
-                )
-                
-                order = self.trading_client.submit_order(order_data=order_data)
-                return f"SELL {abs(current_qty)} shares at ${current_price:.2f}"
-                
-            return "HOLD"
-            
-        except Exception as e:
-            logger.error(f"Error executing trade for {symbol}: {e}")
-            return f"Trade failed: {str(e)}"
-
-# --- Streamlit UI ---
-st.set_page_config(page_title="AI Trading System", layout="wide")
-st.title("🤖 AI-Powered Live Trading System")
-
-# --- Initialize Alpaca Connection ---
-try:
-    # Check if secrets are available
-    if "API_KEY" not in st.secrets or "SECRET_KEY" not in st.secrets:
-        st.error("Please add your Alpaca API credentials to secrets.toml")
-        st.stop()
-    
-    trading_client = TradingClient(st.secrets["API_KEY"], st.secrets["SECRET_KEY"], paper=True)
-    
-    # Test connection
-    account = trading_client.get_account()
-    st.success(f"✅ Connected to Alpaca Paper Trading API")
-    
-except Exception as e:
-    st.error(f"❌ Failed to connect to Alpaca: {e}")
-    st.info("Please check your API credentials in secrets.toml")
+data = st.session_state.market_data
+if not data:
+    st.info("Click **Load / refresh data** in the sidebar to begin.")
     st.stop()
 
-# --- Initialize Session State ---
-if 'trading_system' not in st.session_state:
-    st.session_state.trading_system = LiveTradingSystem(
-        symbols=['AAPL', 'GOOGL', 'MSFT', 'TSLA', 'AMZN'], 
-        trading_client=trading_client
-    )
-    st.session_state.trading_system.initialize_data()
-    st.session_state.trade_log = []
-    st.session_state.is_running = False
+prices = {s: float(d["Close"].iloc[-1]) for s, d in data.items() if not d.empty and "Close" in d.columns}
+st.session_state.portfolio.update_prices(prices)
+port = st.session_state.portfolio
 
-# --- Sidebar Controls ---
-with st.sidebar:
-    st.header("🎮 Trading Controls")
-    
-    # Trading status
-    if st.session_state.is_running:
-        st.success("🟢 System Running")
-        if st.button("⏹️ Stop Trading", type="primary"):
-            st.session_state.is_running = False
-            st.rerun()
-    else:
-        st.info("🔴 System Stopped")
-        if st.button("▶️ Start Trading", type="primary"):
-            st.session_state.is_running = True
-            st.rerun()
-    
-    st.divider()
-    
-    # Settings
-    st.header("⚙️ Settings")
-    selected_symbols = st.multiselect(
-        "Select Trading Symbols",
-        options=['AAPL', 'GOOGL', 'MSFT', 'TSLA', 'AMZN', 'NVDA', 'META'],
-        default=['AAPL', 'GOOGL', 'MSFT']
-    )
-    
-    refresh_interval = st.slider("Refresh Interval (seconds)", 5, 60, 10)
-    
-    # Manual refresh
-    if st.button("🔄 Refresh Data"):
-        st.session_state.trading_system.initialize_data()
-        st.success("Data refreshed!")
+day_pnl = port.equity - INITIAL_CAPITAL * 0.98
+day_pnl_pct = (port.equity / (INITIAL_CAPITAL * 0.98) - 1) * 100
+scanner = scan_signals({k: v for k, v in data.items() if k != BENCHMARK}, strategy)
 
-# --- Main Dashboard ---
-# Account Overview
-col1, col2, col3, col4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Equity", f"${port.equity:,.0f}")
+c2.metric("Cash", f"${port.cash:,.0f}")
+c3.metric("Positions", len(port.positions))
+c4.metric("Day P&L", f"${day_pnl:,.0f}", delta=f"{day_pnl_pct:.2f}%")
+c5.metric("BUY signals", int((scanner["signal"] == "BUY").sum()) if not scanner.empty else 0)
 
-with col1:
-    st.metric("💰 Portfolio Value", f"${float(account.portfolio_value):,.2f}")
-    
-with col2:
-    st.metric("💵 Available Cash", f"${float(account.cash):,.2f}")
-    
-with col3:
-    st.metric("📊 Buying Power", f"${float(account.buying_power):,.2f}")
-    
-with col4:
-    daily_pnl = float(account.equity) - float(account.last_equity)
-    st.metric("📈 Today's P&L", f"${daily_pnl:,.2f}", delta=f"{(daily_pnl/float(account.last_equity)*100):.2f}%")
+cards = insight_cards(scanner, day_pnl_pct)
+html_cards = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin:0.5rem 0 1rem;">'
+for c in cards:
+    border = {"positive": "#22c55e", "warning": "#f59e0b", "neutral": "#3b82f6"}.get(c["tone"], "#3b82f6")
+    html_cards += f'<div style="border-left:4px solid {border};padding:0.8rem;background:#fff;border-radius:8px;border:1px solid #e2e8f0;"><small>{c["icon"]} {c["title"]}</small><div>{c["body"]}</div></div>'
+html_cards += "</div>"
+st.markdown(html_cards, unsafe_allow_html=True)
 
-st.divider()
-
-# Live Trading Dashboard
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.header("📊 Live Charts")
-    
-    # Symbol selector
-    if st.session_state.data:
-        symbol_to_chart = st.selectbox(
-            "Select Symbol to Chart:",
-            options=list(st.session_state.data.keys()),
-            index=0
-        )
-        
-        if symbol_to_chart and not st.session_state.data[symbol_to_chart].empty:
-            df = st.session_state.data[symbol_to_chart]
-            
-            # Create candlestick chart
-            fig = go.Figure()
-            
-            # Add candlestick
-            fig.add_trace(go.Candlestick(
-                x=df.index,
-                open=df['Open'],
-                high=df['High'],
-                low=df['Low'],
-                close=df['Close'],
-                name='Price'
-            ))
-            
-            # Add moving averages
-            if 'SMA_20' in df.columns:
-                fig.add_trace(go.Scatter(
-                    x=df.index, 
-                    y=df['SMA_20'], 
-                    mode='lines', 
-                    name='SMA 20',
-                    line=dict(color='orange')
-                ))
-                
-            if 'SMA_50' in df.columns:
-                fig.add_trace(go.Scatter(
-                    x=df.index, 
-                    y=df['SMA_50'], 
-                    mode='lines', 
-                    name='SMA 50',
-                    line=dict(color='blue')
-                ))
-            
-            # Add Bollinger Bands
-            if 'BB_Upper' in df.columns:
-                fig.add_trace(go.Scatter(
-                    x=df.index, 
-                    y=df['BB_Upper'], 
-                    mode='lines', 
-                    name='BB Upper',
-                    line=dict(color='gray', dash='dash')
-                ))
-                fig.add_trace(go.Scatter(
-                    x=df.index, 
-                    y=df['BB_Lower'], 
-                    mode='lines', 
-                    name='BB Lower',
-                    line=dict(color='gray', dash='dash')
-                ))
-            
-            fig.update_layout(
-                title=f"{symbol_to_chart} - Live Price Action",
-                xaxis_title="Time",
-                yaxis_title="Price ($)",
-                height=500,
-                xaxis_rangeslider_visible=False
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Technical indicators
-            if len(df) > 0:
-                latest = df.iloc[-1]
-                
-                ind_col1, ind_col2, ind_col3 = st.columns(3)
-                
-                with ind_col1:
-                    if 'RSI' in df.columns:
-                        rsi_color = "red" if latest['RSI'] > 70 else ("green" if latest['RSI'] < 30 else "gray")
-                        st.metric("RSI", f"{latest['RSI']:.2f}", delta=None)
-                        
-                with ind_col2:
-                    if 'MACD' in df.columns:
-                        macd_signal = "🔴" if latest['MACD'] < latest['MACD_Signal'] else "🟢"
-                        st.metric("MACD", f"{latest['MACD']:.4f}", delta=f"{macd_signal}")
-                        
-                with ind_col3:
-                    if 'Volume_Ratio' in df.columns:
-                        vol_signal = "🔊" if latest['Volume_Ratio'] > 1.5 else "🔇"
-                        st.metric("Volume Ratio", f"{latest['Volume_Ratio']:.2f}", delta=f"{vol_signal}")
-
-with col2:
-    st.header("📋 Trading Signals")
-    
-    # Generate signals for all symbols
-    if st.session_state.data:
-        for symbol in st.session_state.data.keys():
-            if not st.session_state.data[symbol].empty:
-                signal_info = st.session_state.trading_system.strategy.generate_signal(
-                    st.session_state.data[symbol], symbol
-                )
-                
-                # Display signal
-                if signal_info['signal'] == 1:
-                    st.success(f"🟢 **{symbol}** - BUY")
-                elif signal_info['signal'] == -1:
-                    st.error(f"🔴 **{symbol}** - SELL")
-                else:
-                    st.info(f"⚪ **{symbol}** - HOLD")
-                
-                st.caption(f"Confidence: {signal_info['confidence']:.2f} | {signal_info['reason']}")
-                st.divider()
-
-# Positions and Orders
-st.header("💼 Current Positions")
-try:
-    positions = trading_client.get_all_positions()
-    if positions:
-        pos_data = []
-        for pos in positions:
-            pos_data.append({
-                'Symbol': pos.symbol,
-                'Quantity': pos.qty,
-                'Market Value': f"${float(pos.market_value):,.2f}",
-                'Unrealized P&L': f"${float(pos.unrealized_pl):,.2f}",
-                'Unrealized P&L %': f"{float(pos.unrealized_plpc) * 100:.2f}%"
-            })
-        
-        st.dataframe(pd.DataFrame(pos_data), use_container_width=True)
-    else:
-        st.info("No open positions")
-except Exception as e:
-    st.error(f"Error fetching positions: {e}")
-
-# Trading Log
-st.header("📜 Trading Log")
-if st.session_state.trade_log:
-    log_df = pd.DataFrame(st.session_state.trade_log)
-    st.dataframe(log_df, use_container_width=True)
-else:
-    st.info("No trades executed yet")
-
-# Auto-refresh when running
-if st.session_state.is_running:
-    time.sleep(refresh_interval)
+if auto_refresh:
+    import time
+    time.sleep(30)
+    st.cache_data.clear()
     st.rerun()
 
-# Footer
-st.divider()
-st.caption("⚠️ This is a paper trading system for educational purposes only. Not financial advice.")
+if st.session_state.get("data_source") == "synthetic":
+    st.caption("Using synthetic prices (offline demo mode).")
+
+if st.session_state.get("perfect_demo_done"):
+    st.success("Perfect demo loaded — explore tabs below.")
+
+tabs = st.tabs([
+    "📊 Command", "📡 Scanner", "🧪 Backtest", "💼 Portfolio", "⚠️ Risk",
+    "🔬 Lab", "📦 Alloc", "🎲 Monte Carlo", "📐 Sizing", "⚖️ Compare", "🔔 Alerts",
+    "📦 Export",
+])
+
+with tabs[0]:
+    sym = st.selectbox("Chart symbol", [s for s in data.keys() if s != BENCHMARK], key="chart_sym")
+    df = data[sym]
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55, 0.2, 0.25], vertical_spacing=0.03)
+    fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="OHLC"), row=1, col=1)
+    if "SMA_20" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["SMA_20"], name="SMA20", line=dict(color="orange")), row=1, col=1)
+    if "BB_Upper" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["BB_Upper"], line=dict(width=0), showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["BB_Lower"], fill="tonexty", name="Bollinger", line=dict(width=0)), row=1, col=1)
+    if "RSI" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"), row=2, col=1)
+        fig.add_hline(y=70, line_dash="dash", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", row=2, col=1)
+    if "MACD" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["MACD_Signal"], name="Signal"), row=3, col=1)
+    if BENCHMARK in data and sym != BENCHMARK:
+        bench = data[BENCHMARK]["Close"].reindex(df.index).ffill()
+        norm = bench / bench.iloc[0] * df["Close"].iloc[0]
+        fig.add_trace(go.Scatter(x=df.index, y=norm, name=f"{BENCHMARK} (norm)", line=dict(dash="dot", color="gray")), row=1, col=1)
+    fig.update_layout(height=650, xaxis_rangeslider_visible=False, template="plotly_white")
+    st.plotly_chart(fig, use_container_width=True)
+
+    sig = strategy.generate_signal(df, sym)
+    if st.button("Log signal to journal", type="primary"):
+        port.execute_signal(sym, sig["signal"], prices.get(sym, 0), sig["confidence"], sig["reason"], dry_run=dry_run)
+        st.success(f"Logged {sig['signal']} for {sym}")
+
+with tabs[1]:
+    st.subheader("Multi-symbol scanner")
+    st.dataframe(scanner, use_container_width=True, hide_index=True)
+    st.download_button("Export scanner CSV", scanner.to_csv(index=False).encode(), "scanner.csv")
+    if not scanner.empty:
+        st.plotly_chart(px.bar(scanner, x="symbol", y="confidence", color="signal", title="Confidence by symbol"), use_container_width=True)
+
+with tabs[2]:
+    bt_sym = st.selectbox("Backtest symbol", [s for s in data.keys() if s != BENCHMARK], key="bt_sym")
+    cap = st.number_input("Initial capital", 10_000, 500_000, int(INITIAL_CAPITAL), 5000)
+    if st.button("Run backtest", type="primary"):
+        with st.spinner("Simulating…"):
+            bt = run_backtest(data[bt_sym], bt_sym, float(cap))
+        st.session_state.backtest = bt
+    bt = st.session_state.get("backtest")
+    if bt and not bt.get("equity_curve", pd.Series()).empty:
+        m = bt["metrics"]
+        b1, b2, b3, b4, b5 = st.columns(5)
+        b1.metric("Total return", f"{m.get('total_return', 0):.1%}")
+        b2.metric("Max drawdown", f"{m.get('max_drawdown', 0):.1%}")
+        b3.metric("Sharpe", f"{m.get('sharpe', 0):.2f}")
+        b4.metric("Win rate", f"{m.get('win_rate', 0):.0%}")
+        b5.metric("Trades", m.get("trades", 0))
+        vs = backtest_vs_buy_hold(data[bt_sym], float(cap), bt["equity_curve"])
+        if vs:
+            st.caption(f"Strategy ${vs['strategy']:,.0f} vs buy & hold ${vs['buy_hold']:,.0f} (alpha ${vs['alpha']:,.0f})")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(px.line(bt["equity_curve"], title="Equity curve"), use_container_width=True)
+        with c2:
+            if "drawdown" in bt:
+                st.plotly_chart(px.area(bt["drawdown"], title="Drawdown"), use_container_width=True)
+        if bt["trades"]:
+            st.dataframe(pd.DataFrame(bt["trades"]), use_container_width=True, hide_index=True)
+
+with tabs[3]:
+    st.subheader("Paper positions")
+    if port.positions:
+        pos_df = pd.DataFrame([
+            {"symbol": s, "qty": p["qty"], "avg": p["avg_price"], "last": p["last_price"], "value": p["market_value"]}
+            for s, p in port.positions.items()
+        ])
+        st.dataframe(pos_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No open positions — log BUY signals from Command tab.")
+    st.subheader("Trade journal")
+    if port.trade_log:
+        log_df = pd.DataFrame(port.trade_log)
+        st.dataframe(log_df, use_container_width=True, hide_index=True)
+        st.download_button("Export journal", log_df.to_csv(index=False).encode(), "trade_journal.csv")
+    else:
+        st.caption("No trades logged yet.")
+
+with tabs[4]:
+    sym = st.selectbox("Risk focus", [s for s in data.keys() if s != BENCHMARK], key="risk_sym")
+    rets = analytics.daily_returns(data[sym]["Close"])
+    bench_rets = analytics.daily_returns(data[BENCHMARK]["Close"]) if BENCHMARK in data else rets
+    var, cvar = analytics.var_cvar(rets)
+    r1, r2, r3, r4, r5 = st.columns(5)
+    r1.metric("Sharpe", f"{analytics.sharpe(rets):.2f}")
+    r2.metric("Sortino", f"{analytics.sortino(rets):.2f}")
+    r3.metric("VaR 5%", f"{var:.2%}")
+    r4.metric("Max DD", f"{analytics.max_drawdown(data[sym]['Close']):.1%}")
+    r5.metric("Beta vs SPY", f"{analytics.beta_vs_benchmark(rets, bench_rets):.2f}")
+    corr = analytics.correlation_matrix({k: v for k, v in data.items() if k != BENCHMARK})
+    if not corr.empty:
+        st.plotly_chart(go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.index, colorscale="RdBu", zmid=0)), use_container_width=True)
+    st.plotly_chart(px.histogram(rets, nbins=40, title="Return distribution"), use_container_width=True)
+
+with tabs[5]:
+    render_strategy_lab(data, strategy)
+
+with tabs[6]:
+    render_allocation(data, port)
+
+with tabs[7]:
+    mc_sym = st.selectbox("Symbol", [s for s in data.keys() if s != BENCHMARK], key="mc_sym")
+    mc_days = st.slider("Forward days", 10, 90, 30)
+    mc_sims = st.slider("Simulations", 100, 1000, 300, 100)
+    paths = simulate_paths(data[mc_sym]["Close"], days=mc_days, simulations=mc_sims, initial=port.equity)
+    if not paths.empty:
+        p5 = paths.quantile(0.05, axis=1)
+        p50 = paths.quantile(0.5, axis=1)
+        p95 = paths.quantile(0.95, axis=1)
+        fig = go.Figure()
+        for col in paths.columns[:: max(1, len(paths.columns) // 30)]:
+            fig.add_trace(go.Scatter(y=paths[col], mode="lines", line=dict(width=0.5, color="lightgray"), showlegend=False))
+        fig.add_trace(go.Scatter(y=p50, name="Median", line=dict(color="blue", width=2)))
+        fig.add_trace(go.Scatter(y=p95, fill=None, line=dict(width=0), showlegend=False))
+        fig.add_trace(go.Scatter(y=p5, fill="tonexty", name="90% band", line=dict(width=0)))
+        fig.update_layout(title=f"{mc_sym} — Monte Carlo equity paths", height=450)
+        st.plotly_chart(fig, use_container_width=True)
+        st.metric("Median terminal equity", f"${p50.iloc[-1]:,.0f}")
+
+with tabs[8]:
+    sz_sym = st.selectbox("Symbol", [s for s in data.keys() if s != BENCHMARK], key="sz_sym")
+    entry = float(data[sz_sym]["Close"].iloc[-1])
+    stop = st.number_input("Stop price", 0.0, entry * 2, entry * 0.95)
+    risk_pct = st.slider("Risk % of equity", 0.5, 5.0, 1.0, 0.5)
+    sz = fixed_fractional(port.equity, risk_pct, entry, stop)
+    st.metric("Suggested shares", sz["shares"])
+    st.metric("Position value", f"${sz['position_value']:,.0f}")
+    st.metric("% of equity", f"{sz['pct_of_equity']:.1f}%")
+    wr = st.slider("Kelly — win rate", 0.3, 0.7, 0.55, 0.05)
+    kf = kelly_fraction(wr, 1.2, 1.0)
+    st.caption(f"Kelly fraction (capped): {kf:.1%} of equity")
+
+with tabs[9]:
+    cmp = compare_symbols(data, BENCHMARK)
+    st.dataframe(cmp, use_container_width=True, hide_index=True)
+    if not cmp.empty:
+        st.plotly_chart(px.scatter(cmp, x="volatility", y="return", size="sharpe", hover_name="symbol", title="Risk/return"), use_container_width=True)
+    st.download_button("Export compare CSV", cmp.to_csv(index=False).encode(), "compare.csv")
+
+with tabs[10]:
+    st.subheader("Price alerts (demo)")
+    if "alerts" not in st.session_state:
+        st.session_state.alerts = []
+    a_sym = st.selectbox("Symbol", [s for s in data.keys() if s != BENCHMARK], key="alert_sym")
+    rule = st.selectbox("Rule", ["RSI < 30", "RSI > 70", "Price below SMA20", "MACD bullish cross"])
+    if st.button("Evaluate now"):
+        df = data[a_sym]
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+        fired = False
+        msg = ""
+        if rule == "RSI < 30" and latest.get("RSI", 50) < 30:
+            fired, msg = True, f"{a_sym} RSI oversold ({latest['RSI']:.0f})"
+        elif rule == "RSI > 70" and latest.get("RSI", 50) > 70:
+            fired, msg = True, f"{a_sym} RSI overbought ({latest['RSI']:.0f})"
+        elif rule == "Price below SMA20" and latest["Close"] < latest.get("SMA_20", latest["Close"]):
+            fired, msg = True, f"{a_sym} below SMA20"
+        elif rule == "MACD bullish cross" and latest["MACD"] > latest["MACD_Signal"] and prev["MACD"] <= prev["MACD_Signal"]:
+            fired, msg = True, f"{a_sym} MACD bullish cross"
+        if fired:
+            st.session_state.alerts.insert(0, {"time": datetime.now().strftime("%H:%M:%S"), "message": msg})
+            st.warning(msg)
+        else:
+            st.success("No alert triggered.")
+    if st.session_state.alerts:
+        st.dataframe(pd.DataFrame(st.session_state.alerts), use_container_width=True, hide_index=True)
+
+with tabs[11]:
+    focus = st.selectbox("Brief symbol", [s for s in data.keys() if s != BENCHMARK], key="brief_sym")
+    rets = analytics.daily_returns(data[focus]["Close"])
+    var, cvar = analytics.var_cvar(rets)
+    bt = st.session_state.get("backtest", {})
+    m = bt.get("metrics", {}) if bt else {}
+    m.update({"sharpe": analytics.sharpe(rets), "var": var, "max_drawdown": m.get("max_drawdown", analytics.max_drawdown(data[focus]["Close"]))})
+    brief = executive_brief(scanner, m, focus)
+    with st.expander("Executive brief preview"):
+        st.markdown(brief)
+    render_export_center(scanner, port, m, focus, executive_brief)
+
+st.caption(f"{APP_NAME} · Not financial advice · DEMO.md")

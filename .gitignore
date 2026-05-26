@@ -1,15 +1,6 @@
-# Byte-compiled / optimized / DLL files
+venv/
+.venv/
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-
-# Virtual environment
-.venv
-venv/
-env/
-ENV/
-
-# IDE and editor directories
-.vscode/
-.idea/
+.env
+.streamlit/secrets.toml
