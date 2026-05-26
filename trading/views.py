@@ -42,12 +42,25 @@ def render_strategy_lab(data: dict, strategy: TradingStrategy):
     with c2:
         rs = rolling_sharpe(df["Close"], 30)
         if not rs.empty:
-            st.plotly_chart(px.line(rs, title="Rolling 30d Sharpe"), use_container_width=True)
+            rs_plot = rs.reset_index()
+            rs_plot.columns = ["date", "sharpe"]
+            st.plotly_chart(px.line(rs_plot, x="date", y="sharpe", title="Rolling 30d Sharpe"), use_container_width=True)
 
     cal = calendar_returns(df["Close"])
     if not cal.empty:
         st.subheader("Monthly return calendar")
-        st.plotly_chart(px.imshow(cal, aspect="auto", color_continuous_scale="RdYlGn", zmid=0), use_container_width=True)
+        z = cal.astype(float).values
+        fig = go.Figure(
+            data=go.Heatmap(
+                z=z,
+                x=[str(c) for c in cal.columns],
+                y=[str(i) for i in cal.index],
+                colorscale="RdYlGn",
+                zmid=0,
+            )
+        )
+        fig.update_layout(xaxis_title="Month", yaxis_title="Year", height=320)
+        st.plotly_chart(fig, use_container_width=True)
 
     if st.button("Run walk-forward split", type="primary"):
         st.session_state.wf = walk_forward(df, sym)

@@ -44,11 +44,15 @@ def walk_forward(df: pd.DataFrame, symbol: str, split: float = 0.7, initial: flo
 
 
 def calendar_returns(close: pd.Series) -> pd.DataFrame:
+    if close.empty:
+        return pd.DataFrame()
+    idx = pd.to_datetime(close.index)
     rets = close.pct_change()
-    df = pd.DataFrame({"ret": rets})
+    df = pd.DataFrame({"ret": rets.values}, index=idx)
     df["year"] = df.index.year
     df["month"] = df.index.month
-    return df.pivot_table(index="year", columns="month", values="ret", aggfunc="sum").fillna(0)
+    cal = df.pivot_table(index="year", columns="month", values="ret", aggfunc="sum")
+    return cal.fillna(0).astype(float)
 
 
 def portfolio_allocation(port) -> pd.DataFrame:
