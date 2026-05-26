@@ -17,6 +17,16 @@ from trading.lab import (
 from trading.reports import brief_html, dashboard_html
 from trading.strategy import TradingStrategy
 
+_SIGNAL_LABELS = {-1: "SELL", 0: "HOLD", 1: "BUY"}
+
+
+def _format_signal_matrix(mat: pd.DataFrame) -> pd.DataFrame:
+    """Map numeric signals to labels (Series.map — works on all pandas versions)."""
+    out = mat.copy()
+    for col in out.columns:
+        out[col] = out[col].map(_SIGNAL_LABELS)
+    return out
+
 
 def render_strategy_lab(data: dict, strategy: TradingStrategy):
     st.header("🔬 Strategy Lab")
@@ -28,7 +38,7 @@ def render_strategy_lab(data: dict, strategy: TradingStrategy):
         mat = signal_history_matrix({sym: df}, strategy, lookback=15)
         if not mat.empty:
             st.subheader("Signal history (last 15 bars)")
-            st.dataframe(mat.map({-1: "SELL", 0: "HOLD", 1: "BUY"}), use_container_width=True)
+            st.dataframe(_format_signal_matrix(mat), use_container_width=True)
     with c2:
         rs = rolling_sharpe(df["Close"], 30)
         if not rs.empty:
