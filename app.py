@@ -10,7 +10,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from trading.backtest import backtest_vs_buy_hold, run_backtest
-from trading.compare import compare_symbols
+from trading.compare import compare_symbols, risk_return_scatter
 from trading.monte_carlo import simulate_paths
 from trading.sizing import fixed_fractional, kelly_fraction
 from trading.cloud import is_streamlit_cloud
@@ -289,7 +289,7 @@ with tabs[9]:
     cmp = compare_symbols(data, BENCHMARK)
     st.dataframe(cmp, use_container_width=True, hide_index=True)
     if not cmp.empty:
-        st.plotly_chart(px.scatter(cmp, x="volatility", y="return", size="sharpe", hover_name="symbol", title="Risk/return"), use_container_width=True)
+        st.plotly_chart(risk_return_scatter(cmp), use_container_width=True)
     st.download_button("Export compare CSV", cmp.to_csv(index=False).encode(), "compare.csv")
 
 with tabs[10]:
