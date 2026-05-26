@@ -15,6 +15,8 @@ def fetch_yfinance(symbols: list[str], days: int = 60) -> dict[str, pd.DataFrame
         try:
             raw = yf.download(sym, start=start, end=end, progress=False, auto_adjust=True)
             if raw.empty:
+                from trading.synthetic import generate_synthetic
+                out[sym] = generate_synthetic(sym, days=days)
                 continue
             if isinstance(raw.columns, pd.MultiIndex):
                 raw.columns = raw.columns.get_level_values(0)

@@ -28,6 +28,8 @@
 
 Use the sidebar expander — same flow as above.
 
-## Offline
+## Offline / Streamlit Cloud
 
-Toggle **Force synthetic data** — no internet required.
+Toggle **Force synthetic data** — no internet required. On **share.streamlit.io**, this defaults **on** (Yahoo Finance is often blocked).
+
+Console warnings like `Unrecognized feature: 'battery'` or `403` on `/api/v1/app/event/focus` are from Streamlit’s hosting page, not TradePulse.

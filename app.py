@@ -13,6 +13,7 @@ from trading.backtest import backtest_vs_buy_hold, run_backtest
 from trading.compare import compare_symbols
 from trading.monte_carlo import simulate_paths
 from trading.sizing import fixed_fractional, kelly_fraction
+from trading.cloud import is_streamlit_cloud
 from trading.config import APP_NAME, BENCHMARK, INITIAL_CAPITAL, SCENARIOS, DEFAULT_SYMBOLS
 from trading.data import fetch_yfinance
 from trading.indicators import add_indicators
@@ -50,7 +51,14 @@ with st.sidebar:
     symbols = st.multiselect("Symbols", DEFAULT_SYMBOLS, default=preset_syms[:5])
     days = 90 if present else st.slider("History (days)", 30, 365, 90)
     dry_run = st.toggle("Dry run orders", value=True)
-    use_synthetic = st.toggle("Force synthetic data", value=False, help="Offline demo without Yahoo")
+    _on_cloud = is_streamlit_cloud()
+    use_synthetic = st.toggle(
+        "Force synthetic data",
+        value=_on_cloud,
+        help="Recommended on Streamlit Cloud (Yahoo Finance often blocked). Offline demo without Yahoo.",
+    )
+    if _on_cloud:
+        st.caption("Cloud mode: synthetic data on by default.")
     auto_refresh = False if present else st.toggle("Auto-refresh", value=False)
     if st.button("📥 Load / refresh data", type="primary", use_container_width=True):
         st.cache_data.clear()
@@ -92,7 +100,12 @@ with st.sidebar:
 
 data = st.session_state.market_data
 if not data:
-    st.info("Click **Load / refresh data** in the sidebar to begin.")
+    st.info("Click **Load / refresh data** or **Run perfect demo** in the sidebar to begin.")
+    if is_streamlit_cloud():
+        st.caption(
+            "Browser console warnings about `ambient-light-sensor`, `battery`, or `/api/v1/app/event/focus` "
+            "come from Streamlit Cloud — not this app. They are safe to ignore."
+        )
     st.stop()
 
 prices = {s: float(d["Close"].iloc[-1]) for s, d in data.items() if not d.empty and "Close" in d.columns}

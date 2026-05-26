@@ -1,0 +1,16 @@
+"""Detect Streamlit Community Cloud (share.streamlit.io)."""
+
+import os
+
+
+def is_streamlit_cloud() -> bool:
+    """True when the app runs on Streamlit Cloud, not local dev."""
+    if os.environ.get("STREAMLIT_RUNTIME_ENVIRONMENT") == "cloud":
+        return True
+    blob = " ".join(
+        os.environ.get(k, "")
+        for k in ("HOSTNAME", "STREAMLIT_SERVER_ADDRESS", "STREAMLIT_SHARING_MODE")
+    ).lower()
+    if "streamlit.app" in blob:
+        return True
+    return os.path.isdir("/mount/src")
