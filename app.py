@@ -23,16 +23,19 @@ from trading.reports import brief_html
 from trading.risk import PortfolioAnalytics
 from trading.strategy import TradingStrategy
 from trading.demo_flow import run_perfect_demo
+from trading.theme import hero_html, inject_theme, style_fig
 from trading.views import render_allocation, render_export_center, render_strategy_lab
 
 st.set_page_config(page_title=APP_NAME, page_icon="📈", layout="wide")
-
-st.markdown(f"""
-<div style="background:linear-gradient(135deg,#059669,#2563eb);padding:1.5rem 2rem;border-radius:14px;color:white;">
-<h1 style="margin:0;">📈 {APP_NAME}</h1>
-<p style="margin:0.4rem 0 0;">Perfect demo · Strategy Lab · Walk-forward · Full dashboard export</p>
-</div>
-""", unsafe_allow_html=True)
+inject_theme()
+st.markdown(
+    hero_html(
+        APP_NAME,
+        "Perfect demo · Strategy Lab · Walk-forward · Full dashboard export",
+        "📈",
+    ),
+    unsafe_allow_html=True,
+)
 
 strategy = TradingStrategy()
 analytics = PortfolioAnalytics()
